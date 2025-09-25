@@ -16,6 +16,10 @@ jobs:
         with:
           # Necesitamos obtener todo el historial para poder comparar las ramas
           fetch-depth: 0 
+          # Especificar que queremos fetch de todas las ramas
+          ref: ${{ github.head_ref }}
+          # Traer todas las ramas y tags
+          fetch-tags: true
 
       # 2. Configura el entorno de Python
       - name: Configurar Python
