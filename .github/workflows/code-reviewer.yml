@@ -1,6 +1,5 @@
 name: Revisor de Código con IA (GitHub Models)
 
-# Disparador: Se ejecuta cuando se abre o actualiza una pull request [8].
 on:
   pull_request:
     types: [opened, synchronize]
@@ -10,16 +9,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Clona el repositorio
+      # 1. Clona el repositorio (simplificado, ya que el diff lo obtenemos via API)
       - name: Clonar el repositorio
         uses: actions/checkout@v3
         with:
-          # Necesitamos obtener todo el historial para poder comparar las ramas
-          fetch-depth: 0 
-          # Especificar que queremos fetch de todas las ramas
-          ref: ${{ github.head_ref }}
-          # Traer todas las ramas y tags
-          fetch-tags: true
+          fetch-depth: 1  # Solo necesitamos el commit actual para el script
 
       # 2. Configura el entorno de Python
       - name: Configurar Python
@@ -27,46 +21,96 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 3. Instala las dependencias del script (en este caso, la librería 'requests')
+      # 3. Instala las dependencias del script
       - name: Instalar dependencias
         run: pip install requests
 
-      # 4. Obtiene los cambios (el 'diff') de la pull request
-      # Este paso es clave para saber qué código enviar al modelo [5].
+      # 4. Obtiene los cambios (el 'diff') de la pull request usando la API de GitHub
       - name: Obtener el diff de la Pull Request
         id: get_diff
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Comparamos la rama actual con la rama de destino (ej. 'main')
-          DIFF=$(git diff ${{ github.base_ref }} ${{ github.head_ref }})
-          # Guardamos el diff en una variable de salida para usarla en el siguiente paso
-          echo "diff_content<<EOF" >> $GITHUB_OUTPUT
-          echo "$DIFF" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          # SOLUCIÓN ROBUSTA: Usar la API de GitHub para obtener el diff
+          echo "Obteniendo diff de la PR #${{ github.event.pull_request.number }} via API..."
+          
+          # Hacer la petición a la API de GitHub
+          DIFF_CONTENT=$(curl -s -L \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3.diff" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}")
+          
+          # Verificar que se obtuvo el diff correctamente
+          if [ -z "$DIFF_CONTENT" ]; then
+            echo "Error: No se pudo obtener el diff de la PR"
+            exit 1
+          fi
+          
+          echo "Diff obtenido correctamente (longitud: ${#DIFF_CONTENT} caracteres)"
+          
+          # Guardar el diff en la variable de output (usando delimiter único)
+          DELIMITER="EOF_$(date +%s)_$RANDOM"
+          echo "diff_content<<$DELIMITER" >> $GITHUB_OUTPUT
+          echo "$DIFF_CONTENT" >> $GITHUB_OUTPUT
+          echo "$DELIMITER" >> $GITHUB_OUTPUT
 
       # 5. Ejecuta el script de revisión de código con el diff como argumento
       - name: Generar revisión de código con IA
         id: code_review
-        # Aquí pasamos el token de acceso como una variable de entorno [3].
-        # El script lo leerá para autenticarse.
         env:
           GH_MODELS_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
         run: |
-          # Ejecutamos el script y le pasamos el contenido del diff.
-          # Capturamos su salida (la revisión) en una variable.
-          REVIEW_COMMENT=$(python review_code.py "${{ steps.get_diff.outputs.diff_content }}")
-          echo "review_content<<EOF" >> $GITHUB_OUTPUT
+          echo "Ejecutando script de revisión de código..."
+          
+          # Usar un archivo temporal para el diff para evitar problemas de comillas/escapado
+          DIFF_FILE="pr_diff.txt"
+          echo "${{ steps.get_diff.outputs.diff_content }}" > "$DIFF_FILE"
+          
+          # Verificar el contenido del archivo
+          echo "Longitud del diff: $(wc -c < "$DIFF_FILE") caracteres"
+          echo "Primeras 100 líneas del diff:"
+          head -100 "$DIFF_FILE"
+          
+          # Ejecutar el script pasando el archivo como argumento
+          REVIEW_COMMENT=$(python review_code.py "$DIFF_FILE")
+          
+          # Limpiar el archivo temporal
+          rm -f "$DIFF_FILE"
+          
+          # Guardar la revisión
+          DELIMITER="REVIEW_$(date +%s)_$RANDOM"
+          echo "review_content<<$DELIMITER" >> $GITHUB_OUTPUT
           echo "$REVIEW_COMMENT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-      
+          echo "$DELIMITER" >> $GITHUB_OUTPUT
+          
+          echo "Revisión generada correctamente"
+
       # 6. Publica la revisión como un comentario en la Pull Request
-      # Esto simula a un miembro del equipo dejando sus comentarios [5, 9].
       - name: Publicar comentario en la Pull Request
         uses: actions/github-script@v6
+        env:
+          REVIEW_CONTENT: ${{ steps.code_review.outputs.review_content }}
         with:
           script: |
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: '### 🤖 Revisión de Código por IA\n\n${{ steps.code_review.outputs.review_content }}'
-            })
+            try {
+              const reviewContent = process.env.REVIEW_CONTENT;
+              
+              if (!reviewContent || reviewContent.trim() === '') {
+                console.log('La revisión está vacía, no se publicará comentario');
+                return;
+              }
+              
+              // Publicar el comentario en la PR
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `### 🤖 Revisión de Código por IA\n\n${reviewContent}`
+              });
+              
+              console.log('Comentario publicado exitosamente en la PR');
+            } catch (error) {
+              console.error('Error al publicar el comentario:', error);
+              // No fallar el workflow si hay error al publicar el comentario
+            }
