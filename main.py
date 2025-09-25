@@ -10,7 +10,7 @@ def despedida():
     """
     Nueva función para despedirse.
     """
-    print("¡Adiós! - PR Demo Models")
+    print("By bye! - PR Demo Models")
 
 if __name__ == "__main__":
     saludar()
