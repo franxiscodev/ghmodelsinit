@@ -1,0 +1,68 @@
+name: Revisor de Código con IA (GitHub Models)
+
+# Disparador: Se ejecuta cuando se abre o actualiza una pull request [8].
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  code-review:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Clona el repositorio
+      - name: Clonar el repositorio
+        uses: actions/checkout@v3
+        with:
+          # Necesitamos obtener todo el historial para poder comparar las ramas
+          fetch-depth: 0 
+
+      # 2. Configura el entorno de Python
+      - name: Configurar Python
+        uses: actions/setup-python@v3
+        with:
+          python-version: '3.10'
+
+      # 3. Instala las dependencias del script (en este caso, la librería 'requests')
+      - name: Instalar dependencias
+        run: pip install requests
+
+      # 4. Obtiene los cambios (el 'diff') de la pull request
+      # Este paso es clave para saber qué código enviar al modelo [5].
+      - name: Obtener el diff de la Pull Request
+        id: get_diff
+        run: |
+          # Comparamos la rama actual con la rama de destino (ej. 'main')
+          DIFF=$(git diff ${{ github.base_ref }} ${{ github.head_ref }})
+          # Guardamos el diff en una variable de salida para usarla en el siguiente paso
+          echo "diff_content<<EOF" >> $GITHUB_OUTPUT
+          echo "$DIFF" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # 5. Ejecuta el script de revisión de código con el diff como argumento
+      - name: Generar revisión de código con IA
+        id: code_review
+        # Aquí pasamos el token de acceso como una variable de entorno [3].
+        # El script lo leerá para autenticarse.
+        env:
+          GH_MODELS_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
+        run: |
+          # Ejecutamos el script y le pasamos el contenido del diff.
+          # Capturamos su salida (la revisión) en una variable.
+          REVIEW_COMMENT=$(python review_code.py "${{ steps.get_diff.outputs.diff_content }}")
+          echo "review_content<<EOF" >> $GITHUB_OUTPUT
+          echo "$REVIEW_COMMENT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      
+      # 6. Publica la revisión como un comentario en la Pull Request
+      # Esto simula a un miembro del equipo dejando sus comentarios [5, 9].
+      - name: Publicar comentario en la Pull Request
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '### 🤖 Revisión de Código por IA\n\n${{ steps.code_review.outputs.review_content }}'
+            })
